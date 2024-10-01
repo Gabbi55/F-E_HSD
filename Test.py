@@ -276,4 +276,3 @@ def update_graph_scatter(n):
 # Start of the Dash server
 if __name__ == '__main__':
     app.run_server(port=4052)
-
