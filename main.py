@@ -1,4 +1,5 @@
 import struct
+import threading
 from datetime import datetime, timedelta
 
 import dash
@@ -40,7 +41,6 @@ colors = {
 # Create layout of Dash-app graphs of data and map
 app.layout = html.Div(style={'backgroundColor': colors['background']},
                       children=[
-                          # Headline of Dash-app
                           html.H1(
                               children="Luftdaten-Analyse",
                               style={
@@ -49,7 +49,6 @@ app.layout = html.Div(style={'backgroundColor': colors['background']},
                                   'backgroundColor': colors['background']
                               }
                           ),
-                          # Slider for x-axis limit
                           html.Div([
                               html.Label('Zeitraum der Datendarstellung (in Minuten):'),
                               dcc.Slider(
@@ -61,10 +60,9 @@ app.layout = html.Div(style={'backgroundColor': colors['background']},
                                   marks={i: f'{i}' for i in range(0, 61, 10)},
                               ),
                           ],
-                                style={'backgroundColor': colors['background'], 'color': colors['text']}
+                              style={'backgroundColor': colors['background'], 'color': colors['text']}
                           ),
 
-                          # Graphs of temp, hum, pm1, pm25, pm10
                           html.Div([
                               html.Div([dcc.Graph(id='live-graph-temp_hum', animate=True)],
                                        style={'display': 'inline-block', 'width': '25%'}),
@@ -79,12 +77,11 @@ app.layout = html.Div(style={'backgroundColor': colors['background']},
                                      'display': 'flex', 'flex-direction': 'row'}
                           ),
 
-                          # Graph for altitude of plane and position on map
                           html.Div([
                               html.Div([
                                   dl.Map([
-                                      dl.TileLayer(),  # OpenStreetMap
-                                      dl.LayerGroup(id="marker-layer"),  # LayerGroup to store all markers
+                                      dl.TileLayer(),
+                                      dl.LayerGroup(id="marker-layer"),
                                   ], center=[51.4325, 6.8797], zoom=10, id='live-map',
                                       style={'width': '100%', 'height': '500px'}),
                               ], style={'display': 'inline-block', 'width': '65%'}),
@@ -93,7 +90,6 @@ app.layout = html.Div(style={'backgroundColor': colors['background']},
                                   style={'display': 'inline-block', 'width': '35%'}),
                           ], style={'display': 'flex', 'flex-direction': 'row'}),
 
-                          # Interval component to update the graphs every second
                           dcc.Interval(
                               id='graph-update',
                               interval=1000,  # 1000 msec = 1 sec
@@ -101,6 +97,43 @@ app.layout = html.Div(style={'backgroundColor': colors['background']},
                           )
                       ]
                       )
+
+
+# Background data-reading thread
+def read_serial_data():
+    while True:
+        if ser.in_waiting > 0:
+            while ser.read() != b'<':
+                pass
+            struct_size = struct.calcsize(struct_format)
+            data = ser.read(struct_size)
+
+            if ser.read() == b'>':
+                if len(data) == struct_size:
+                    unpacked_data = struct.unpack(struct_format, data)
+                    (pm1, pm25, pm10, sumBins, temp, altitude, hum, xtra, co2, year, month, day, hour, minute, second,
+                     lat,
+                     lng, heading) = unpacked_data
+
+                    # Append data to lists
+                    with threading.Lock():
+                        timestamp = datetime(year, month, day, hour, minute, second)
+                        pm1_values.append(pm1)
+                        pm2_5_values.append(pm25)
+                        pm10_values.append(pm10)
+                        timestamps.append(timestamp)
+                        lng_values.append(lng)
+                        lat_values.append(lat)
+                        altitude_values.append(altitude)
+                        temp_values.append(temp)
+                        hum_values.append(hum)
+                        marker_positions.append(
+                            {'position': [lat, lng], 'temperature': temp, 'humidity': hum, 'pm1': pm1, 'pm10': pm10,
+                             'pm25': pm25})
+
+
+# Start the background thread
+threading.Thread(target=read_serial_data, daemon=True).start()
 
 
 @app.callback([Output('live-graph-temp_hum', 'figure'),
@@ -111,158 +144,131 @@ app.layout = html.Div(style={'backgroundColor': colors['background']},
                Output('live-graph-altitude', 'figure')],
               [Input('graph-update', 'n_intervals'),
                Input('lim-x-axis-slider', 'value')])
-def update_graph_scatter(n, lim_x_axis):
+def update_graph_scatter(n_intervals, lim_x_axis):
     min_time = None
     max_time = None
-    # Check if data is available from serial port
-    if ser.in_waiting > 0:
-        while ser.read() != b'<':
-            pass
-        struct_size = struct.calcsize(struct_format)
-        data = ser.read(struct_size)
 
-        if ser.read() == b'>':
-            if len(data) == struct_size:
-                unpacked_data = struct.unpack(struct_format, data)
-                (pm1, pm25, pm10, sumBins, temp, altitude, hum, xtra, co2, year, month, day, hour, minute, second, lat,
-                 lng, heading) = unpacked_data
+    # Using a threading lock to prevent the race condition
+    with threading.Lock():
+        # Set the x-axis limits to the chosen 'lim_x_axis'-value
+        if timestamps:
+            min_time = timestamps[-1] - timedelta(minutes=lim_x_axis)
+            max_time = timestamps[-1]
 
-                # Append data to lists
-                timestamp = datetime(year, month, day, hour, minute, second)
-                pm1_values.append(pm1)
-                pm2_5_values.append(pm25)
-                pm10_values.append(pm10)
-                timestamps.append(timestamp)
-                lng_values.append(lng)
-                lat_values.append(lat)
-                altitude_values.append(altitude)
-                temp_values.append(temp)
-                hum_values.append(hum)
-                marker_positions.append(
-                    {'position': [lat, lng], 'temperature': temp, 'humidity': hum, 'pm1': pm1, 'pm10': pm10,
-                     'pm25': pm25})
+        # Define scatter plots for Temp and Humidity
+        scatter_temp = go.Scatter(
+            x=list(timestamps),
+            y=list(temp_values),
+            name='Temp',
+            mode='lines+markers',
+            yaxis='y1'
+        )
+        scatter_hum = go.Scatter(
+            x=list(timestamps),
+            y=list(hum_values),
+            name='Humidity',
+            mode='lines+markers',
+            yaxis='y2'
+        )
 
-    # Set the x-axis limits to the chosen 'lim_x_axis'-value
-    if timestamps:
-        min_time = timestamps[-1] - timedelta(minutes=lim_x_axis)
-        max_time = timestamps[-1]
+        layout_temp_hum = go.Layout(
+            xaxis=dict(title='Zeit', type='date', range=[min_time, max_time]),
+            yaxis=dict(title='Temperatur (°C)', side='left'),
+            yaxis2=dict(title='Luftfeuchte (%)', overlaying='y', side='right'),
+            legend=dict(yanchor="bottom", xanchor="right"),
+            title='Temp & Humidity',
+            paper_bgcolor=colors['paper_color'],
+            plot_bgcolor=colors['plot_background'],
+            font=dict(color=colors['text']),
+            height=400,
+            margin={'l': 40, 'r': 35, 't': 105, 'b': 80}
+        )
 
-    # Define scatter plots for Temp and Humidity
-    scatter_temp = go.Scatter(
-        x=list(timestamps),
-        y=list(temp_values),
-        name='Temp',
-        mode='lines+markers',
-        yaxis='y1'
-    )
-    scatter_hum = go.Scatter(
-        x=list(timestamps),
-        y=list(hum_values),
-        name='Humidity',
-        mode='lines+markers',
-        yaxis='y2'
-    )
+        # Define scatter plots for PM1, PM2.5 and PM10 values
+        scatter_pm1 = go.Scatter(
+            x=list(timestamps),
+            y=list(pm1_values),
+            name='PM1',
+            mode='lines+markers'
+        )
+        scatter_pm25 = go.Scatter(
+            x=list(timestamps),
+            y=list(pm2_5_values),
+            name='PM2.5',
+            mode='lines+markers'
+        )
+        scatter_pm10 = go.Scatter(
+            x=list(timestamps),
+            y=list(pm10_values),
+            name='PM10',
+            mode='lines+markers'
+        )
 
-    layout_temp_hum = go.Layout(
-        xaxis=dict(title='Zeit', type='date', range=[min_time, max_time]),
-        yaxis=dict(title='Temperatur (°C)', side='left'),
-        yaxis2=dict(title='Luftfeuchte (%)', overlaying='y', side='right'),
-        legend=dict(yanchor="bottom", xanchor="right"),
-        title='Temp & Humidity',
-        paper_bgcolor=colors['paper_color'],
-        plot_bgcolor=colors['plot_background'],
-        font=dict(color=colors['text']),
-        height=400,
-        margin={'l': 40, 'r': 35, 't': 105, 'b': 80}
-    )
+        layout_pm1 = go.Layout(
+            xaxis=dict(title='Zeit', type='date', range=[min_time, max_time]),
+            yaxis=dict(title='Partikelkonzentration (µg/m³)'),
+            title='PM1 Werte',
+            paper_bgcolor=colors['paper_color'],
+            plot_bgcolor=colors['plot_background'],
+            font=dict(color=colors['text']),
+            height=400,
+            margin={'l': 40, 'r': 20, 't': 40, 'b': 80}
+        )
 
-    # Define scatter plots for PM1, PM2.5 and PM10 values
-    scatter_pm1 = go.Scatter(
-        x=list(timestamps),
-        y=list(pm1_values),
-        name='PM1',
-        mode='lines+markers'
-    )
-    scatter_pm25 = go.Scatter(
-        x=list(timestamps),
-        y=list(pm2_5_values),
-        name='PM2.5',
-        mode='lines+markers'
-    )
-    scatter_pm10 = go.Scatter(
-        x=list(timestamps),
-        y=list(pm10_values),
-        name='PM10',
-        mode='lines+markers'
-    )
+        layout_pm25 = go.Layout(
+            xaxis=dict(title='Zeit', type='date', range=[min_time, max_time]),
+            yaxis=dict(title='Partikelkonzentration (µg/m³)'),
+            title='PM2.5 Werte',
+            paper_bgcolor=colors['paper_color'],
+            plot_bgcolor=colors['plot_background'],
+            font=dict(color=colors['text']),
+            height=400,
+            margin={'l': 40, 'r': 20, 't': 40, 'b': 80}
+        )
 
-    layout_pm1 = go.Layout(
-        xaxis=dict(title='Zeit', type='date', range=[min_time, max_time]),
-        yaxis=dict(title='Partikelkonzentration (µg/m³)'),
-        title='PM1 Werte',
-        paper_bgcolor=colors['paper_color'],
-        plot_bgcolor=colors['plot_background'],
-        font=dict(color=colors['text']),
-        height=400,
-        margin={'l': 40, 'r': 20, 't': 40, 'b': 80}
-    )
+        layout_pm10 = go.Layout(
+            xaxis=dict(title='Zeit', type='date', range=[min_time, max_time]),
+            yaxis=dict(title='Partikelkonzentration (µg/m³)'),
+            title='PM10 Werte',
+            paper_bgcolor=colors['paper_color'],
+            plot_bgcolor=colors['plot_background'],
+            font=dict(color=colors['text']),
+            height=400,
+            margin={'l': 40, 'r': 20, 't': 40, 'b': 80}
+        )
 
-    layout_pm25 = go.Layout(
-        xaxis=dict(title='Zeit', type='date', range=[min_time, max_time]),
-        yaxis=dict(title='Partikelkonzentration (µg/m³)'),
-        title='PM2.5 Werte',
-        paper_bgcolor=colors['paper_color'],
-        plot_bgcolor=colors['plot_background'],
-        font=dict(color=colors['text']),
-        height=400,
-        margin={'l': 40, 'r': 20, 't': 40, 'b': 80}
-    )
+        markers = [
+            dl.CircleMarker(center=pos['position'], radius=2, color="blue", fill=True, fillOpacity=0.6,
+                            children=[
+                                dl.Tooltip(html.Div([
+                                    html.Div(f"Lat: {pos['position'][0]:.6f}"),
+                                    html.Div(f"Lng: {pos['position'][1]:.6f}"),
+                                    html.Div(f"Temp: {pos['temperature']:.2f}°C"),
+                                    html.Div(f"Hum: {pos['humidity']:.2f}%"),
+                                    html.Div(f"pm1: {pos['pm1']:.2f}µg/m³"),
+                                    html.Div(f"pm10: {pos['pm10']:.2f}µg/m³"),
+                                    html.Div(f"pm25: {pos['pm25']:.2f}µg/m³"),
+                                ]))
+                            ])
+            for pos in marker_positions
+        ]
 
-    layout_pm10 = go.Layout(
-        xaxis=dict(title='Zeit', type='date', range=[min_time, max_time]),
-        yaxis=dict(title='Partikelkonzentration (µg/m³)'),
-        title='PM10 Werte',
-        paper_bgcolor=colors['paper_color'],
-        plot_bgcolor=colors['plot_background'],
-        font=dict(color=colors['text']),
-        height=400,
-        margin={'l': 40, 'r': 20, 't': 40, 'b': 80}
-    )
-
-    # List of marker on map with information
-    markers = [
-        dl.CircleMarker(center=pos['position'], radius=2, color="blue", fill=True, fillOpacity=0.6,
-                        children=[
-                            dl.Tooltip(html.Div([
-                                html.Div(f"Lat: {pos['position'][0]:.6f}"),
-                                html.Div(f"Lng: {pos['position'][1]:.6f}"),
-                                html.Div(f"Temp: {pos['temperature']:.2f}°C"),
-                                html.Div(f"Hum: {pos['humidity']:.2f}%"),
-                                html.Div(f"pm1: {pos['pm1']:.2f}µg/m³"),
-                                html.Div(f"pm10: {pos['pm10']:.2f}µg/m³"),
-                                html.Div(f"pm25: {pos['pm25']:.2f}µg/m³"),
-                            ]))
-                        ])
-        for pos in marker_positions
-    ]
-
-    # Define scatter plot for altitude data
-    scatter_altitude = go.Scatter(
-        x=list(timestamps),
-        y=list(altitude_values),
-        name='Altitude',
-        mode='lines+markers'
-    )
-    layout_altitude = go.Layout(
-        xaxis=dict(title='Zeit', type='date', range=[min_time, max_time]),
-        yaxis=dict(title='Höhe (m)'),
-        title='Flughöhe',
-        paper_bgcolor=colors['paper_color'],
-        plot_bgcolor=colors['plot_background'],
-        font=dict(color=colors['text']),
-        height=500,
-        margin={'l': 40, 'r': 40, 't': 40, 'b': 40}
-    )
+        scatter_altitude = go.Scatter(
+            x=list(timestamps),
+            y=list(altitude_values),
+            name='Altitude',
+            mode='lines+markers'
+        )
+        layout_altitude = go.Layout(
+            xaxis=dict(title='Zeit', type='date', range=[min_time, max_time]),
+            yaxis=dict(title='Höhe (m)'),
+            title='Flughöhe',
+            paper_bgcolor=colors['paper_color'],
+            plot_bgcolor=colors['plot_background'],
+            font=dict(color=colors['text']),
+            height=500,
+            margin={'l': 40, 'r': 40, 't': 40, 'b': 40}
+        )
 
     return [{
         'data': [scatter_temp, scatter_hum],
